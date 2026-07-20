@@ -1,4 +1,3 @@
-
 import { useState, useEffect } from 'react';
 
 export default function Admin() {
@@ -15,20 +14,24 @@ export default function Admin() {
   const [tab, setTab] = useState('envelopes');
   const [rewardTab, setRewardTab] = useState('product');
 
-  // Bulk product state
-  const [products, setProducts] = useState([{ url: '', image: '', title: '', envelopes: '' }]);
+  // Products state
+  const [products, setProducts] = useState([
+    { url: '', image: '', title: '', msg: '', selectedEnvelopes: new Set() }
+  ]);
   const [fetchingIdx, setFetchingIdx] = useState(null);
-  const [savingBulk, setSavingBulk] = useState(false);
+  const [savingProducts, setSavingProducts] = useState(false);
 
-  // Bulk discount state
-  const [discounts, setDiscounts] = useState([{ code: '', envelopes: '' }]);
+  // Discounts state
+  const [discounts, setDiscounts] = useState([
+    { code: '', msg: '', selectedEnvelopes: new Set() }
+  ]);
   const [savingDiscounts, setSavingDiscounts] = useState(false);
 
-  // Per-envelope message state
-  const [messages, setMessages] = useState({});
-  const [savingMessages, setSavingMessages] = useState(false);
+  // Lose state
+  const [loseMsg, setLoseMsg] = useState('Better luck next time! 🎲');
+  const [savingLose, setSavingLose] = useState(false);
 
-  // Single envelope edit
+  // Edit single envelope
   const [editEnv, setEditEnv] = useState(null);
   const [editForm, setEditForm] = useState({ type: 'empty', product_url: '', product_image: '', discount_code: '', reward_message: '' });
   const [saving, setSaving] = useState(false);
@@ -49,23 +52,13 @@ export default function Admin() {
       setEnvelopes(envData);
       setCustomers((await custRes.json()).customers || []);
       setShipping((await shipRes.json()).shipping || []);
-
-      // init messages from existing data
-      const msgMap = {};
-      envData.forEach(e => {
-        if (e.reward_message) msgMap[e.envelope_number] = e.reward_message;
-      });
-      setMessages(msgMap);
-    } catch (err) {
-      showMsg('Failed to load data', 'error');
-    }
+    } catch (err) { showMsg('Failed to load data', 'error'); }
     setLoading(false);
   }
 
   function showMsg(text, type = 'success') {
-    setMessage(text);
-    setMsgType(type);
-    setTimeout(() => setMessage(''), 4000);
+    setMessage(text); setMsgType(type);
+    setTimeout(() => setMessage(''), 5000);
   }
 
   async function handleReset() {
@@ -76,156 +69,137 @@ export default function Admin() {
       const data = await res.json();
       showMsg(data.message || 'Reset done');
       fetchData();
-    } catch (err) {
-      showMsg('Reset failed', 'error');
-    }
+    } catch (err) { showMsg('Reset failed', 'error'); }
     setResetting(false);
   }
 
   useEffect(() => { fetchData(); }, []);
 
-  // ── Parse envelope ranges ──────────────────────────────────
-  function parseEnvelopes(str) {
-    const nums = new Set();
-    str.split(',').forEach(part => {
-      part = part.trim();
-      if (part.includes('-')) {
-        const [a, b] = part.split('-').map(Number);
-        for (let i = a; i <= b; i++) if (i >= 1 && i <= 100) nums.add(i);
-      } else {
-        const n = Number(part);
-        if (n >= 1 && n <= 100) nums.add(n);
-      }
-    });
-    return [...nums];
+  // ── Get all assigned envelope numbers ─────────────────────
+  function getAllAssigned(excludeProductIdx = -1, excludeDiscountIdx = -1) {
+    const assigned = new Set();
+    products.forEach((p, i) => { if (i !== excludeProductIdx) p.selectedEnvelopes.forEach(n => assigned.add(n)); });
+    discounts.forEach((d, i) => { if (i !== excludeDiscountIdx) d.selectedEnvelopes.forEach(n => assigned.add(n)); });
+    return assigned;
   }
 
-  // ── Fetch product ─────────────────────────────────────────
-  async function fetchProduct(idx) {
+  // ── Toggle envelope selection ──────────────────────────────
+  function toggleEnvelopeProduct(pIdx, num) {
+    const assigned = getAllAssigned(pIdx, -1);
+    if (assigned.has(num)) return; // already assigned elsewhere
+    setProducts(prev => prev.map((p, i) => {
+      if (i !== pIdx) return p;
+      const s = new Set(p.selectedEnvelopes);
+      s.has(num) ? s.delete(num) : s.add(num);
+      return { ...p, selectedEnvelopes: s };
+    }));
+  }
+
+  function toggleEnvelopeDiscount(dIdx, num) {
+    const assigned = getAllAssigned(-1, dIdx);
+    if (assigned.has(num)) return;
+    setDiscounts(prev => prev.map((d, i) => {
+      if (i !== dIdx) return d;
+      const s = new Set(d.selectedEnvelopes);
+      s.has(num) ? s.delete(num) : s.add(num);
+      return { ...d, selectedEnvelopes: s };
+    }));
+  }
+
+  // ── Fetch product image ────────────────────────────────────
+  async function fetchProductImg(idx) {
     const url = products[idx].url;
     if (!url) return;
     setFetchingIdx(idx);
     try {
       const res = await fetch('/api/fetch-product', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ product_url: url }),
       });
       const data = await res.json();
       if (data.image) {
         setProducts(prev => prev.map((p, i) => i === idx ? { ...p, image: data.image, title: data.title } : p));
-      } else {
-        showMsg('Could not fetch product. Check URL.', 'error');
-      }
-    } catch (err) {
-      showMsg('Failed to fetch product', 'error');
-    }
+        showMsg(`✅ Product fetched: ${data.title}`);
+      } else showMsg('Could not fetch product. Check URL.', 'error');
+    } catch (err) { showMsg('Failed to fetch product', 'error'); }
     setFetchingIdx(null);
   }
 
-  // ── Save bulk products ─────────────────────────────────────
-  async function saveBulkProducts() {
-    setSavingBulk(true);
+  // ── Save products ──────────────────────────────────────────
+  async function saveProducts() {
+    setSavingProducts(true);
     try {
       const batch = [];
       for (const p of products) {
-        if (!p.url || !p.image || !p.envelopes) continue;
-        const nums = parseEnvelopes(p.envelopes);
-        nums.forEach(n => batch.push({
-          envelope_number: n,
-          type: 'product',
-          product_url: p.url,
-          product_image: p.image,
-          discount_code: '',
-          reward_message: '',
+        if (!p.image || !p.selectedEnvelopes.size) continue;
+        p.selectedEnvelopes.forEach(n => batch.push({
+          envelope_number: n, type: 'product',
+          product_url: p.url, product_image: p.image,
+          discount_code: '', reward_message: p.msg || 'You won a Mystery T-Shirt! 🎉',
         }));
       }
-      if (batch.length === 0) { showMsg('Nothing to save', 'error'); setSavingBulk(false); return; }
+      if (!batch.length) { showMsg('No products with envelopes selected', 'error'); setSavingProducts(false); return; }
       const res = await fetch('/api/bulk-update-envelopes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ envelopes: batch }),
       });
       const data = await res.json();
-      if (data.status === 'ok') {
-        showMsg(`✅ Updated ${data.updated} envelopes with products!`);
-        fetchData();
-      } else {
-        showMsg('Save failed', 'error');
-      }
-    } catch (err) {
-      showMsg('Save failed', 'error');
-    }
-    setSavingBulk(false);
+      if (data.status === 'ok') { showMsg(`✅ Saved ${data.updated} product envelopes!`); fetchData(); }
+      else showMsg('Save failed', 'error');
+    } catch (err) { showMsg('Save failed', 'error'); }
+    setSavingProducts(false);
   }
 
-  // ── Save bulk discounts ────────────────────────────────────
-  async function saveBulkDiscounts() {
+  // ── Save discounts ─────────────────────────────────────────
+  async function saveDiscounts() {
     setSavingDiscounts(true);
     try {
       const batch = [];
       for (const d of discounts) {
-        if (!d.code || !d.envelopes) continue;
-        const nums = parseEnvelopes(d.envelopes);
-        nums.forEach(n => batch.push({
-          envelope_number: n,
-          type: 'discount',
-          product_url: '',
-          product_image: '',
-          discount_code: d.code,
-          reward_message: '',
+        if (!d.code || !d.selectedEnvelopes.size) continue;
+        d.selectedEnvelopes.forEach(n => batch.push({
+          envelope_number: n, type: 'discount',
+          product_url: '', product_image: '',
+          discount_code: d.code, reward_message: d.msg || 'You got a discount code! 🏷',
         }));
       }
-      if (batch.length === 0) { showMsg('Nothing to save', 'error'); setSavingDiscounts(false); return; }
+      if (!batch.length) { showMsg('No discounts with envelopes selected', 'error'); setSavingDiscounts(false); return; }
       const res = await fetch('/api/bulk-update-envelopes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ envelopes: batch }),
       });
       const data = await res.json();
-      if (data.status === 'ok') {
-        showMsg(`✅ Updated ${data.updated} envelopes with discount codes!`);
-        fetchData();
-      } else {
-        showMsg('Save failed', 'error');
-      }
-    } catch (err) {
-      showMsg('Save failed', 'error');
-    }
+      if (data.status === 'ok') { showMsg(`✅ Saved ${data.updated} discount envelopes!`); fetchData(); }
+      else showMsg('Save failed', 'error');
+    } catch (err) { showMsg('Save failed', 'error'); }
     setSavingDiscounts(false);
   }
 
-  // ── Save messages ─────────────────────────────────────────
-  async function saveMessages() {
-    setSavingMessages(true);
+  // ── Save lose message to ALL unassigned envelopes ──────────
+  async function saveLose() {
+    setSavingLose(true);
     try {
-      const batch = Object.entries(messages)
-        .filter(([, msg]) => msg && msg.trim())
-        .map(([num, msg]) => ({
-          envelope_number: Number(num),
-          type: 'empty',
-          product_url: '',
-          product_image: '',
-          discount_code: '',
-          reward_message: msg.trim(),
-        }));
-      if (batch.length === 0) { showMsg('No messages to save', 'error'); setSavingMessages(false); return; }
+      const assigned = getAllAssigned();
+      const batch = [];
+      for (let i = 1; i <= 100; i++) {
+        if (!assigned.has(i)) {
+          batch.push({
+            envelope_number: i, type: 'empty',
+            product_url: '', product_image: '',
+            discount_code: '', reward_message: loseMsg,
+          });
+        }
+      }
+      if (!batch.length) { showMsg('All envelopes already assigned!', 'error'); setSavingLose(false); return; }
       const res = await fetch('/api/bulk-update-envelopes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ envelopes: batch }),
       });
       const data = await res.json();
-      if (data.status === 'ok') {
-        showMsg(`✅ Saved messages for ${data.updated} envelopes!`);
-        fetchData();
-      } else {
-        showMsg('Save failed', 'error');
-      }
-    } catch (err) {
-      showMsg('Save failed', 'error');
-    }
-    setSavingMessages(false);
+      if (data.status === 'ok') { showMsg(`✅ Lose message set for ${data.updated} envelopes!`); fetchData(); }
+      else showMsg('Save failed', 'error');
+    } catch (err) { showMsg('Save failed', 'error'); }
+    setSavingLose(false);
   }
 
   // ── Single envelope edit ───────────────────────────────────
@@ -244,23 +218,15 @@ export default function Admin() {
   async function handleFetchProductSingle() {
     if (!editForm.product_url) return;
     setFetchingProduct(true);
-    setProductPreview(null);
     try {
       const res = await fetch('/api/fetch-product', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ product_url: editForm.product_url }),
       });
       const data = await res.json();
-      if (data.image) {
-        setProductPreview(data);
-        setEditForm(f => ({ ...f, product_image: data.image }));
-      } else {
-        showMsg('Could not fetch product image', 'error');
-      }
-    } catch (err) {
-      showMsg('Failed to fetch product', 'error');
-    }
+      if (data.image) { setProductPreview(data); setEditForm(f => ({ ...f, product_image: data.image })); }
+      else showMsg('Could not fetch product image', 'error');
+    } catch (err) { showMsg('Failed to fetch product', 'error'); }
     setFetchingProduct(false);
   }
 
@@ -269,21 +235,13 @@ export default function Admin() {
     setSaving(true);
     try {
       const res = await fetch('/api/update-envelope', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ envelope_number: editEnv.envelope_number, ...editForm }),
       });
       const data = await res.json();
-      if (data.status === 'ok') {
-        showMsg(`✅ Envelope #${editEnv.envelope_number} updated!`);
-        setEditEnv(null);
-        fetchData();
-      } else {
-        showMsg(data.error || 'Save failed', 'error');
-      }
-    } catch (err) {
-      showMsg('Save failed', 'error');
-    }
+      if (data.status === 'ok') { showMsg(`✅ Envelope #${editEnv.envelope_number} updated!`); setEditEnv(null); fetchData(); }
+      else showMsg(data.error || 'Save failed', 'error');
+    } catch (err) { showMsg('Save failed', 'error'); }
     setSaving(false);
   }
 
@@ -318,22 +276,15 @@ export default function Admin() {
   );
 
   const Th = ({ children }) => (
-    <th style={{
-      textAlign: 'left', padding: '12px 20px', fontSize: '12px',
-      fontWeight: 700, color: '#64748b', textTransform: 'uppercase',
-      letterSpacing: '0.05em', borderBottom: '1px solid #f1f5f9', background: '#f8fafc',
-    }}>{children}</th>
+    <th style={{ textAlign: 'left', padding: '12px 20px', fontSize: '12px', fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid #f1f5f9', background: '#f8fafc' }}>{children}</th>
   );
-
   const Td = ({ children }) => (
     <td style={{ padding: '12px 20px', fontSize: '14px', color: '#475569' }}>{children}</td>
   );
 
   const mainTabBtn = (t, label) => (
     <button onClick={() => { setTab(t); setSearch(''); setFilter('all'); }} style={{
-      padding: '10px 16px',
-      borderRadius: '8px 8px 0 0',
-      border: '1px solid #e2e8f0',
+      padding: '10px 16px', borderRadius: '8px 8px 0 0', border: '1px solid #e2e8f0',
       borderBottom: tab === t ? '1px solid #fff' : '1px solid #e2e8f0',
       fontSize: '13px', fontWeight: 700, cursor: 'pointer',
       background: tab === t ? '#fff' : '#f8fafc',
@@ -342,79 +293,75 @@ export default function Admin() {
     }}>{label}</button>
   );
 
-  const rewardTabBtn = (t, label, color) => (
-    <button onClick={() => setRewardTab(t)} style={{
-      padding: '10px 20px',
-      borderRadius: '8px',
-      border: '2px solid',
-      borderColor: rewardTab === t ? color : '#e2e8f0',
-      fontSize: '13px', fontWeight: 700, cursor: 'pointer',
-      background: rewardTab === t ? color : '#f8fafc',
-      color: rewardTab === t ? '#fff' : '#64748b',
-    }}>{label}</button>
-  );
-
   const inputStyle = {
     width: '100%', padding: '10px 14px', border: '1px solid #e2e8f0',
     borderRadius: '8px', fontSize: '14px', outline: 'none',
-    background: '#f8fafc', color: '#1e293b', boxSizing: 'border-box',
-    fontFamily: 'inherit', transition: 'border-color 0.2s',
+    background: '#f8fafc', color: '#1e293b', boxSizing: 'border-box', fontFamily: 'inherit',
   };
 
   const typeColors = {
     product:  { bg: '#eff6ff', color: '#2563eb', label: '🛍 Product' },
     discount: { bg: '#fdf4ff', color: '#9333ea', label: '🏷 Discount' },
-    empty:    { bg: '#f1f5f9', color: '#64748b', label: '📭 Message' },
+    empty:    { bg: '#f1f5f9', color: '#64748b', label: '😔 Lose' },
   };
 
+  // ── Mini envelope grid for reward assignment ───────────────
+  function EnvelopeGrid({ selectedEnvelopes, onToggle, color }) {
+    const assigned = getAllAssigned();
+    return (
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(10,1fr)', gap: '4px', marginTop: '12px' }}>
+        {Array.from({ length: 100 }, (_, i) => i + 1).map(num => {
+          const isSelected = selectedEnvelopes.has(num);
+          const isAssignedElsewhere = assigned.has(num) && !isSelected;
+          const env = envelopes.find(e => e.envelope_number === num);
+          const isClaimed = env?.status === 'claimed';
+          return (
+            <div
+              key={num}
+              onClick={() => !isAssignedElsewhere && !isClaimed && onToggle(num)}
+              title={isClaimed ? 'Already claimed' : isAssignedElsewhere ? 'Assigned to another reward' : `Envelope #${num}`}
+              style={{
+                aspectRatio: '1',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '9px',
+                fontWeight: 700,
+                cursor: isAssignedElsewhere || isClaimed ? 'not-allowed' : 'pointer',
+                background: isClaimed ? '#e2e8f0' : isSelected ? color : isAssignedElsewhere ? '#f1f5f9' : '#fff',
+                color: isClaimed ? '#94a3b8' : isSelected ? '#fff' : isAssignedElsewhere ? '#cbd5e1' : '#475569',
+                border: `1px solid ${isClaimed ? '#e2e8f0' : isSelected ? color : isAssignedElsewhere ? '#e2e8f0' : '#e2e8f0'}`,
+                transition: 'all 0.1s',
+                transform: isSelected ? 'scale(1.05)' : 'scale(1)',
+              }}
+            >{num}</div>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
-    <main style={{
-      minHeight: '100vh', background: '#f8fafc',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      color: '#1e293b',
-    }}>
+    <main style={{ minHeight: '100vh', background: '#f8fafc', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: '#1e293b' }}>
 
       {/* Header */}
-      <div style={{
-        background: '#fff', borderBottom: '1px solid #e2e8f0',
-        padding: '0 32px', display: 'flex', alignItems: 'center',
-        justifyContent: 'space-between', height: '64px',
-        position: 'sticky', top: 0, zIndex: 100,
-        boxShadow: '0 1px 3px rgba(0,0,0,0.06)',
-      }}>
+      <div style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '0 32px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '64px', position: 'sticky', top: 0, zIndex: 100, boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <span style={{ fontSize: '22px' }}>🎁</span>
           <span style={{ fontWeight: 700, fontSize: '18px' }}>Mystery Vault</span>
-          <span style={{
-            background: '#f1f5f9', color: '#64748b', fontSize: '12px',
-            fontWeight: 600, padding: '2px 10px', borderRadius: '20px',
-          }}>Admin</span>
+          <span style={{ background: '#f1f5f9', color: '#64748b', fontSize: '12px', fontWeight: 600, padding: '2px 10px', borderRadius: '20px' }}>Admin</span>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button onClick={fetchData} style={{
-            padding: '8px 16px', background: '#f1f5f9', border: '1px solid #e2e8f0',
-            borderRadius: '8px', fontSize: '13px', fontWeight: 600,
-            cursor: 'pointer', color: '#475569',
-          }}>↻ Refresh</button>
-          <button onClick={handleReset} disabled={resetting} style={{
-            padding: '8px 16px', background: resetting ? '#fca5a5' : '#ef4444',
-            color: '#fff', border: 'none', borderRadius: '8px',
-            fontSize: '13px', fontWeight: 700,
-            cursor: resetting ? 'not-allowed' : 'pointer',
-          }}>{resetting ? 'Resetting...' : '⚠ Reset All'}</button>
+          <button onClick={fetchData} style={{ padding: '8px 16px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', fontWeight: 600, cursor: 'pointer', color: '#475569' }}>↻ Refresh</button>
+          <button onClick={handleReset} disabled={resetting} style={{ padding: '8px 16px', background: resetting ? '#fca5a5' : '#ef4444', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: resetting ? 'not-allowed' : 'pointer' }}>{resetting ? 'Resetting...' : '⚠ Reset All'}</button>
         </div>
       </div>
 
       <div style={{ maxWidth: '1300px', margin: '0 auto', padding: '32px 24px' }}>
 
         {message && (
-          <div style={{
-            background: msgType === 'error' ? '#fef2f2' : '#dcfce7',
-            border: `1px solid ${msgType === 'error' ? '#fca5a5' : '#86efac'}`,
-            color: msgType === 'error' ? '#dc2626' : '#166534',
-            padding: '12px 20px', borderRadius: '10px', marginBottom: '24px',
-            fontWeight: 600, fontSize: '14px', display: 'flex', justifyContent: 'space-between',
-          }}>
+          <div style={{ background: msgType === 'error' ? '#fef2f2' : '#dcfce7', border: `1px solid ${msgType === 'error' ? '#fca5a5' : '#86efac'}`, color: msgType === 'error' ? '#dc2626' : '#166534', padding: '12px 20px', borderRadius: '10px', marginBottom: '24px', fontWeight: 600, fontSize: '14px', display: 'flex', justifyContent: 'space-between' }}>
             {message}
             <span style={{ cursor: 'pointer' }} onClick={() => setMessage('')}>✕</span>
           </div>
@@ -429,10 +376,7 @@ export default function Admin() {
               { label: 'Unclaimed', value: stats.unclaimed, icon: '🔓', bg: '#eff6ff', border: '#93c5fd', val: '#2563eb' },
               { label: 'Eligible Customers', value: stats.total_eligible, icon: '👥', bg: '#fdf4ff', border: '#d8b4fe', val: '#9333ea' },
             ].map(s => (
-              <div key={s.label} style={{
-                background: s.bg, border: `1px solid ${s.border}`,
-                borderRadius: '14px', padding: '24px',
-              }}>
+              <div key={s.label} style={{ background: s.bg, border: `1px solid ${s.border}`, borderRadius: '14px', padding: '24px' }}>
                 <div style={{ fontSize: '24px', marginBottom: '8px' }}>{s.icon}</div>
                 <div style={{ fontSize: '32px', fontWeight: 800, color: s.val }}>{s.value}</div>
                 <div style={{ fontSize: '13px', color: '#64748b', fontWeight: 500, marginTop: '4px' }}>{s.label}</div>
@@ -442,105 +386,117 @@ export default function Admin() {
         )}
 
         {/* Main Tabs */}
-        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginBottom: '0' }}>
+        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
           {mainTabBtn('envelopes', '📦 Envelopes')}
           {mainTabBtn('rewards', '🎁 Set Rewards')}
-          {mainTabBtn('customers', `👥 Eligible Customers (${filteredCustomers.length})`)}
+          {mainTabBtn('customers', `👥 Eligible (${filteredCustomers.length})`)}
           {mainTabBtn('notclaimed', `⏳ Not Claimed (${notClaimedYet.length})`)}
           {mainTabBtn('shipping', `🚚 Shipping (${filteredShipping.length})`)}
         </div>
 
         {/* ── REWARDS TAB ── */}
         {tab === 'rewards' && (
-          <div style={{
-            background: '#fff', border: '1px solid #e2e8f0',
-            borderRadius: '0 14px 14px 14px', padding: '32px',
-            boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-          }}>
-            <h2 style={{ fontWeight: 800, fontSize: '20px', marginBottom: '8px' }}>🎁 Set Envelope Rewards</h2>
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '0 14px 14px 14px', padding: '32px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+            <h2 style={{ fontWeight: 800, fontSize: '20px', marginBottom: '6px' }}>🎁 Set Envelope Rewards</h2>
             <p style={{ color: '#64748b', fontSize: '14px', marginBottom: '28px' }}>
-              Assign products, discount codes, or messages to envelopes. Use ranges like <strong>1-30</strong> or individual numbers like <strong>1,5,7</strong>.
+              Click envelopes to assign them. <span style={{ background: '#eff6ff', color: '#2563eb', padding: '2px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 700 }}>Blue = Product</span>{' '}
+              <span style={{ background: '#fdf4ff', color: '#9333ea', padding: '2px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 700 }}>Purple = Discount</span>{' '}
+              <span style={{ background: '#f1f5f9', color: '#64748b', padding: '2px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 700 }}>Grey = Lose</span>
             </p>
 
-            {/* Reward sub tabs */}
-            <div style={{ display: 'flex', gap: '10px', marginBottom: '28px', flexWrap: 'wrap' }}>
-              {rewardTabBtn('product', '🛍 Products', '#2563eb')}
-              {rewardTabBtn('discount', '🏷 Discount Codes', '#9333ea')}
-              {rewardTabBtn('message', '📭 Messages', '#64748b')}
+            {/* Sub tabs */}
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '28px', borderBottom: '2px solid #f1f5f9', paddingBottom: '0' }}>
+              {[
+                { id: 'product', label: '🛍 Products', color: '#2563eb' },
+                { id: 'discount', label: '🏷 Discounts', color: '#9333ea' },
+                { id: 'lose', label: '😔 Lose Message', color: '#64748b' },
+              ].map(t => (
+                <button key={t.id} onClick={() => setRewardTab(t.id)} style={{
+                  padding: '10px 20px', border: 'none', borderBottom: rewardTab === t.id ? `3px solid ${t.color}` : '3px solid transparent',
+                  background: 'none', fontSize: '14px', fontWeight: 700, cursor: 'pointer',
+                  color: rewardTab === t.id ? t.color : '#94a3b8',
+                  marginBottom: '-2px',
+                }}>{t.label}</button>
+              ))}
             </div>
 
             {/* PRODUCTS */}
             {rewardTab === 'product' && (
               <div>
-                <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>
-                  Add multiple products — each can be assigned to different envelope ranges.
-                </p>
                 {products.map((p, idx) => (
-                  <div key={idx} style={{
-                    background: '#f8fafc', border: '1px solid #e2e8f0',
-                    borderRadius: '14px', padding: '20px', marginBottom: '16px',
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                      <span style={{ fontWeight: 700, fontSize: '14px', color: '#1e293b' }}>Product {idx + 1}</span>
-                      {products.length > 1 && (
-                        <button onClick={() => setProducts(prev => prev.filter((_, i) => i !== idx))} style={{
-                          background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626',
-                          borderRadius: '6px', padding: '4px 10px', fontSize: '12px',
-                          fontWeight: 600, cursor: 'pointer',
-                        }}>✕ Remove</button>
-                      )}
+                  <div key={idx} style={{ background: '#f8fafc', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '24px', marginBottom: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                      <span style={{ fontWeight: 800, fontSize: '15px', color: '#1e293b' }}>🛍 Product {idx + 1}</span>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '13px', color: '#64748b' }}>{p.selectedEnvelopes.size} envelopes selected</span>
+                        {products.length > 1 && (
+                          <button onClick={() => setProducts(prev => prev.filter((_, i) => i !== idx))} style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '6px', padding: '4px 10px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>✕ Remove</button>
+                        )}
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
-                      <input
-                        value={p.url}
-                        onChange={e => setProducts(prev => prev.map((x, i) => i === idx ? { ...x, url: e.target.value } : x))}
-                        placeholder="https://stdesignsllc.com/products/..."
-                        style={{ ...inputStyle, flex: 1 }}
-                      />
-                      <button onClick={() => fetchProduct(idx)} disabled={fetchingIdx === idx} style={{
-                        padding: '10px 16px', background: '#3b82f6', color: '#fff',
-                        border: 'none', borderRadius: '8px', fontSize: '13px',
-                        fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap',
-                        opacity: fetchingIdx === idx ? 0.7 : 1,
-                      }}>{fetchingIdx === idx ? '...' : '🔍 Fetch'}</button>
+
+                    {/* URL input */}
+                    <div style={{ marginBottom: '12px' }}>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>Product URL</label>
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <input
+                          value={p.url}
+                          onChange={e => setProducts(prev => prev.map((x, i) => i === idx ? { ...x, url: e.target.value } : x))}
+                          placeholder="https://stdesignsllc.com/products/..."
+                          style={{ ...inputStyle, flex: 1 }}
+                        />
+                        <button onClick={() => fetchProductImg(idx)} disabled={fetchingIdx === idx} style={{ padding: '10px 16px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer', opacity: fetchingIdx === idx ? 0.7 : 1, whiteSpace: 'nowrap' }}>
+                          {fetchingIdx === idx ? '...' : '🔍 Fetch'}
+                        </button>
+                      </div>
                     </div>
+
+                    {/* Image preview */}
                     {p.image && (
-                      <div style={{
-                        display: 'flex', gap: '12px', alignItems: 'center',
-                        background: '#f0fdf4', border: '1px solid #86efac',
-                        borderRadius: '10px', padding: '12px', marginBottom: '12px',
-                      }}>
-                        <img src={p.image} alt="" style={{ width: '50px', height: '50px', objectFit: 'cover', borderRadius: '8px' }} />
+                      <div style={{ display: 'flex', gap: '12px', alignItems: 'center', background: '#f0fdf4', border: '1px solid #86efac', borderRadius: '10px', padding: '12px', marginBottom: '12px' }}>
+                        <img src={p.image} alt="" style={{ width: '56px', height: '56px', objectFit: 'cover', borderRadius: '8px' }} />
                         <div>
                           <div style={{ fontWeight: 700, fontSize: '14px', color: '#166534' }}>{p.title}</div>
                           <div style={{ fontSize: '12px', color: '#4ade80' }}>✅ Image ready</div>
                         </div>
                       </div>
                     )}
-                    <div>
-                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>
-                        Assign to envelopes (e.g. 1-30 or 1,5,10)
-                      </label>
+
+                    {/* Message */}
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>Message shown to customer</label>
                       <input
-                        value={p.envelopes}
-                        onChange={e => setProducts(prev => prev.map((x, i) => i === idx ? { ...x, envelopes: e.target.value } : x))}
-                        placeholder="e.g. 1-30 or 1,5,10,15"
+                        value={p.msg}
+                        onChange={e => setProducts(prev => prev.map((x, i) => i === idx ? { ...x, msg: e.target.value } : x))}
+                        placeholder="You won a Mystery T-Shirt! 🎉"
                         style={inputStyle}
+                      />
+                    </div>
+
+                    {/* Envelope grid */}
+                    <div>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '4px' }}>
+                        Click envelopes to assign to this product
+                      </label>
+                      <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>
+                        Click to select/deselect. Grey = assigned elsewhere. White = available.
+                      </p>
+                      <EnvelopeGrid
+                        selectedEnvelopes={p.selectedEnvelopes}
+                        onToggle={(num) => toggleEnvelopeProduct(idx, num)}
+                        color="#2563eb"
                       />
                     </div>
                   </div>
                 ))}
-                <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
-                  <button onClick={() => setProducts(prev => [...prev, { url: '', image: '', title: '', envelopes: '' }])} style={{
-                    padding: '10px 20px', background: '#f1f5f9', border: '1px solid #e2e8f0',
-                    borderRadius: '8px', fontSize: '13px', fontWeight: 700,
-                    cursor: 'pointer', color: '#475569',
-                  }}>+ Add Another Product</button>
-                  <button onClick={saveBulkProducts} disabled={savingBulk} style={{
-                    padding: '10px 28px', background: savingBulk ? '#94a3b8' : '#2563eb',
-                    color: '#fff', border: 'none', borderRadius: '8px',
-                    fontSize: '13px', fontWeight: 800, cursor: savingBulk ? 'not-allowed' : 'pointer',
-                  }}>{savingBulk ? 'Saving...' : '💾 Save All Products'}</button>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button onClick={() => setProducts(prev => [...prev, { url: '', image: '', title: '', msg: '', selectedEnvelopes: new Set() }])} style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer', color: '#475569' }}>
+                    + Add Another Product
+                  </button>
+                  <button onClick={saveProducts} disabled={savingProducts} style={{ padding: '10px 28px', background: savingProducts ? '#94a3b8' : '#2563eb', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 800, cursor: savingProducts ? 'not-allowed' : 'pointer' }}>
+                    {savingProducts ? 'Saving...' : '💾 Save Products'}
+                  </button>
                 </div>
               </div>
             )}
@@ -548,28 +504,20 @@ export default function Admin() {
             {/* DISCOUNTS */}
             {rewardTab === 'discount' && (
               <div>
-                <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>
-                  Add multiple discount codes — each assigned to different envelope ranges.
-                </p>
                 {discounts.map((d, idx) => (
-                  <div key={idx} style={{
-                    background: '#f8fafc', border: '1px solid #e2e8f0',
-                    borderRadius: '14px', padding: '20px', marginBottom: '16px',
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-                      <span style={{ fontWeight: 700, fontSize: '14px', color: '#1e293b' }}>Discount Code {idx + 1}</span>
-                      {discounts.length > 1 && (
-                        <button onClick={() => setDiscounts(prev => prev.filter((_, i) => i !== idx))} style={{
-                          background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626',
-                          borderRadius: '6px', padding: '4px 10px', fontSize: '12px',
-                          fontWeight: 600, cursor: 'pointer',
-                        }}>✕ Remove</button>
-                      )}
+                  <div key={idx} style={{ background: '#f8fafc', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '24px', marginBottom: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                      <span style={{ fontWeight: 800, fontSize: '15px', color: '#1e293b' }}>🏷 Discount {idx + 1}</span>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span style={{ fontSize: '13px', color: '#64748b' }}>{d.selectedEnvelopes.size} envelopes selected</span>
+                        {discounts.length > 1 && (
+                          <button onClick={() => setDiscounts(prev => prev.filter((_, i) => i !== idx))} style={{ background: '#fef2f2', border: '1px solid #fca5a5', color: '#dc2626', borderRadius: '6px', padding: '4px 10px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>✕ Remove</button>
+                        )}
+                      </div>
                     </div>
+
                     <div style={{ marginBottom: '12px' }}>
-                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>
-                        Discount Code
-                      </label>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>Discount Code</label>
                       <input
                         value={d.code}
                         onChange={e => setDiscounts(prev => prev.map((x, i) => i === idx ? { ...x, code: e.target.value.toUpperCase() } : x))}
@@ -577,66 +525,65 @@ export default function Admin() {
                         style={{ ...inputStyle, fontFamily: 'monospace', letterSpacing: '2px', fontSize: '16px', fontWeight: 700 }}
                       />
                     </div>
-                    <div>
-                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>
-                        Assign to envelopes (e.g. 31-60 or 2,4,6)
-                      </label>
+
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>Message shown to customer</label>
                       <input
-                        value={d.envelopes}
-                        onChange={e => setDiscounts(prev => prev.map((x, i) => i === idx ? { ...x, envelopes: e.target.value } : x))}
-                        placeholder="e.g. 31-60 or 2,4,6"
+                        value={d.msg}
+                        onChange={e => setDiscounts(prev => prev.map((x, i) => i === idx ? { ...x, msg: e.target.value } : x))}
+                        placeholder="You got a discount code! 🏷"
                         style={inputStyle}
+                      />
+                    </div>
+
+                    <div>
+                      <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '4px' }}>Click envelopes to assign to this discount</label>
+                      <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>Click to select/deselect.</p>
+                      <EnvelopeGrid
+                        selectedEnvelopes={d.selectedEnvelopes}
+                        onToggle={(num) => toggleEnvelopeDiscount(idx, num)}
+                        color="#9333ea"
                       />
                     </div>
                   </div>
                 ))}
-                <div style={{ display: 'flex', gap: '12px', marginTop: '8px' }}>
-                  <button onClick={() => setDiscounts(prev => [...prev, { code: '', envelopes: '' }])} style={{
-                    padding: '10px 20px', background: '#f1f5f9', border: '1px solid #e2e8f0',
-                    borderRadius: '8px', fontSize: '13px', fontWeight: 700,
-                    cursor: 'pointer', color: '#475569',
-                  }}>+ Add Another Code</button>
-                  <button onClick={saveBulkDiscounts} disabled={savingDiscounts} style={{
-                    padding: '10px 28px', background: savingDiscounts ? '#94a3b8' : '#9333ea',
-                    color: '#fff', border: 'none', borderRadius: '8px',
-                    fontSize: '13px', fontWeight: 800, cursor: savingDiscounts ? 'not-allowed' : 'pointer',
-                  }}>{savingDiscounts ? 'Saving...' : '💾 Save All Codes'}</button>
+
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button onClick={() => setDiscounts(prev => [...prev, { code: '', msg: '', selectedEnvelopes: new Set() }])} style={{ padding: '10px 20px', background: '#f1f5f9', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer', color: '#475569' }}>
+                    + Add Another Discount
+                  </button>
+                  <button onClick={saveDiscounts} disabled={savingDiscounts} style={{ padding: '10px 28px', background: savingDiscounts ? '#94a3b8' : '#9333ea', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 800, cursor: savingDiscounts ? 'not-allowed' : 'pointer' }}>
+                    {savingDiscounts ? 'Saving...' : '💾 Save Discounts'}
+                  </button>
                 </div>
               </div>
             )}
 
-            {/* MESSAGES */}
-            {rewardTab === 'message' && (
-              <div>
-                <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>
-                  Set a custom message for each envelope. Leave blank to keep existing.
-                </p>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: '10px', marginBottom: '20px' }}>
-                  {Array.from({ length: 100 }, (_, i) => i + 1).map(num => (
-                    <div key={num} style={{
-                      display: 'flex', gap: '8px', alignItems: 'center',
-                      background: '#f8fafc', border: '1px solid #e2e8f0',
-                      borderRadius: '8px', padding: '10px 12px',
-                    }}>
-                      <span style={{ fontWeight: 700, color: '#3b82f6', fontSize: '13px', minWidth: '32px' }}>#{num}</span>
-                      <input
-                        value={messages[num] || ''}
-                        onChange={e => setMessages(prev => ({ ...prev, [num]: e.target.value }))}
-                        placeholder="Message for this envelope..."
-                        style={{
-                          flex: 1, padding: '7px 10px', border: '1px solid #e2e8f0',
-                          borderRadius: '6px', fontSize: '13px', outline: 'none',
-                          background: '#fff', fontFamily: 'inherit',
-                        }}
-                      />
-                    </div>
-                  ))}
+            {/* LOSE */}
+            {rewardTab === 'lose' && (
+              <div style={{ background: '#f8fafc', border: '2px solid #e2e8f0', borderRadius: '16px', padding: '24px' }}>
+                <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-start', marginBottom: '20px' }}>
+                  <div style={{ fontSize: '48px' }}>😔</div>
+                  <div>
+                    <h3 style={{ fontWeight: 800, fontSize: '16px', color: '#1e293b', marginBottom: '4px' }}>Lose Message</h3>
+                    <p style={{ color: '#64748b', fontSize: '13px' }}>
+                      This message shows for all envelopes NOT assigned to a product or discount.
+                      Currently <strong>{100 - getAllAssigned().size}</strong> envelopes will show this message.
+                    </p>
+                  </div>
                 </div>
-                <button onClick={saveMessages} disabled={savingMessages} style={{
-                  padding: '12px 32px', background: savingMessages ? '#94a3b8' : '#1e293b',
-                  color: '#fff', border: 'none', borderRadius: '8px',
-                  fontSize: '14px', fontWeight: 800, cursor: savingMessages ? 'not-allowed' : 'pointer',
-                }}>{savingMessages ? 'Saving...' : '💾 Save All Messages'}</button>
+                <div style={{ marginBottom: '20px' }}>
+                  <label style={{ display: 'block', fontWeight: 600, fontSize: '13px', color: '#374151', marginBottom: '6px' }}>Message</label>
+                  <input
+                    value={loseMsg}
+                    onChange={e => setLoseMsg(e.target.value)}
+                    placeholder="Better luck next time! 🎲"
+                    style={{ ...inputStyle, fontSize: '15px' }}
+                  />
+                </div>
+                <button onClick={saveLose} disabled={savingLose} style={{ padding: '12px 28px', background: savingLose ? '#94a3b8' : '#475569', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 800, cursor: savingLose ? 'not-allowed' : 'pointer' }}>
+                  {savingLose ? 'Saving...' : '💾 Save Lose Message'}
+                </button>
               </div>
             )}
           </div>
@@ -645,40 +592,18 @@ export default function Admin() {
         {/* ── OTHER TABS ── */}
         {tab !== 'rewards' && (
           <>
-            <input
-              type="text"
-              placeholder="Search email, name, order ID, envelope #..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              style={{
-                width: '100%', padding: '10px 16px', border: '1px solid #e2e8f0',
-                borderRadius: '8px', fontSize: '14px', outline: 'none',
-                background: '#fff', color: '#1e293b',
-                marginBottom: '0', marginTop: '20px',
-                boxSizing: 'border-box',
-              }}
-            />
+            <input type="text" placeholder="Search email, order ID, envelope #..." value={search} onChange={e => setSearch(e.target.value)} style={{ width: '100%', padding: '10px 16px', border: '1px solid #e2e8f0', borderRadius: '8px', fontSize: '14px', outline: 'none', background: '#fff', color: '#1e293b', marginTop: '16px', marginBottom: '0', boxSizing: 'border-box' }} />
 
-            <div style={{
-              background: '#fff', border: '1px solid #e2e8f0',
-              borderRadius: '14px', overflow: 'hidden', marginTop: '16px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-            }}>
+            <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', overflow: 'hidden', marginTop: '16px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)' }}>
+
               {tab === 'envelopes' && (
                 <div style={{ padding: '12px 20px', borderBottom: '1px solid #f1f5f9', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                   {['all', 'claimed', 'unclaimed', 'product', 'discount', 'empty'].map(f => (
-                    <button key={f} onClick={() => setFilter(f)} style={{
-                      padding: '5px 12px', borderRadius: '20px', border: '1px solid',
-                      fontSize: '12px', fontWeight: 600, cursor: 'pointer',
-                      background: filter === f ? '#1e293b' : '#f8fafc',
-                      color: filter === f ? '#fff' : '#64748b',
-                      borderColor: filter === f ? '#1e293b' : '#e2e8f0',
-                      textTransform: 'capitalize',
-                    }}>{f === 'all' ? 'All' : f === 'claimed' ? '✅ Claimed' : f === 'unclaimed' ? '🔓 Unclaimed' : f === 'product' ? '🛍 Product' : f === 'discount' ? '🏷 Discount' : '📭 Message'}</button>
+                    <button key={f} onClick={() => setFilter(f)} style={{ padding: '5px 12px', borderRadius: '20px', border: '1px solid', fontSize: '12px', fontWeight: 600, cursor: 'pointer', background: filter === f ? '#1e293b' : '#f8fafc', color: filter === f ? '#fff' : '#64748b', borderColor: filter === f ? '#1e293b' : '#e2e8f0' }}>
+                      {f === 'all' ? 'All' : f === 'claimed' ? '✅ Claimed' : f === 'unclaimed' ? '🔓 Unclaimed' : f === 'product' ? '🛍 Product' : f === 'discount' ? '🏷 Discount' : '😔 Lose'}
+                    </button>
                   ))}
-                  <span style={{ color: '#94a3b8', fontSize: '13px', marginLeft: 'auto' }}>
-                    {filteredEnvelopes.length} results
-                  </span>
+                  <span style={{ color: '#94a3b8', fontSize: '13px', marginLeft: 'auto' }}>{filteredEnvelopes.length} results</span>
                 </div>
               )}
 
@@ -689,56 +614,24 @@ export default function Admin() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '600px' }}>
 
                     {tab === 'envelopes' && <>
-                      <thead>
-                        <tr>
-                          <Th>#</Th><Th>Status</Th><Th>Type</Th><Th>Reward</Th>
-                          <Th>Customer Email</Th><Th>Claimed At</Th><Th>Edit</Th>
-                        </tr>
-                      </thead>
+                      <thead><tr><Th>#</Th><Th>Status</Th><Th>Type</Th><Th>Reward</Th><Th>Customer Email</Th><Th>Claimed At</Th><Th>Edit</Th></tr></thead>
                       <tbody>
                         {filteredEnvelopes.map((env, i) => {
                           const tc = typeColors[env.type] || typeColors.empty;
                           return (
-                            <tr key={env.envelope_number}
-                              style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }}
-                              onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'}
-                              onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}
-                            >
+                            <tr key={env.envelope_number} style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }} onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'} onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}>
                               <td style={{ padding: '12px 20px', fontWeight: 700, color: '#3b82f6' }}>#{env.envelope_number}</td>
+                              <Td><span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700, background: env.status === 'claimed' ? '#dcfce7' : '#f1f5f9', color: env.status === 'claimed' ? '#16a34a' : '#94a3b8' }}>{env.status === 'claimed' ? '✅ Claimed' : 'Unclaimed'}</span></Td>
+                              <Td><span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700, background: tc.bg, color: tc.color }}>{tc.label}</span></Td>
                               <Td>
-                                <span style={{
-                                  padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700,
-                                  background: env.status === 'claimed' ? '#dcfce7' : '#f1f5f9',
-                                  color: env.status === 'claimed' ? '#16a34a' : '#94a3b8',
-                                }}>{env.status === 'claimed' ? '✅ Claimed' : 'Unclaimed'}</span>
-                              </Td>
-                              <Td>
-                                <span style={{
-                                  padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700,
-                                  background: tc.bg, color: tc.color,
-                                }}>{tc.label}</span>
-                              </Td>
-                              <Td>
-                                {env.type === 'product' && env.product_image && (
-                                  <img src={env.product_image} alt="" style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '6px' }} />
-                                )}
-                                {env.type === 'discount' && (
-                                  <span style={{ fontFamily: 'monospace', background: '#f1f5f9', padding: '2px 8px', borderRadius: '4px', fontSize: '13px', fontWeight: 700 }}>
-                                    {env.discount_code}
-                                  </span>
-                                )}
-                                {(!env.type || env.type === 'empty') && (
-                                  <span style={{ color: '#94a3b8', fontSize: '13px' }}>{env.reward_message || '—'}</span>
-                                )}
+                                {env.type === 'product' && env.product_image && <img src={env.product_image} alt="" style={{ width: '40px', height: '40px', objectFit: 'cover', borderRadius: '6px' }} />}
+                                {env.type === 'discount' && <span style={{ fontFamily: 'monospace', background: '#f1f5f9', padding: '2px 8px', borderRadius: '4px', fontSize: '13px', fontWeight: 700 }}>{env.discount_code}</span>}
+                                {(!env.type || env.type === 'empty') && <span style={{ color: '#94a3b8', fontSize: '13px' }}>{env.reward_message || '—'}</span>}
                               </Td>
                               <Td>{env.customer_email || '—'}</Td>
                               <Td>{env.claimed_at ? new Date(env.claimed_at).toLocaleString() : '—'}</Td>
                               <td style={{ padding: '12px 20px' }}>
-                                <button onClick={() => openEdit(env)} style={{
-                                  padding: '6px 14px', background: '#1e293b', color: '#fff',
-                                  border: 'none', borderRadius: '6px', fontSize: '12px',
-                                  fontWeight: 600, cursor: 'pointer',
-                                }}>✏ Edit</button>
+                                <button onClick={() => openEdit(env)} style={{ padding: '6px 14px', background: '#1e293b', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' }}>✏ Edit</button>
                               </td>
                             </tr>
                           );
@@ -747,29 +640,18 @@ export default function Admin() {
                     </>}
 
                     {tab === 'customers' && <>
-                      <thead><tr><Th>Email</Th><Th>Order ID</Th><Th>Order Amount</Th><Th>Registered At</Th><Th>Status</Th><Th>Claimed Envelope</Th></tr></thead>
+                      <thead><tr><Th>Email</Th><Th>Order ID</Th><Th>Amount</Th><Th>Registered At</Th><Th>Status</Th><Th>Claimed Envelope</Th></tr></thead>
                       <tbody>
-                        {filteredCustomers.length === 0 ? (
-                          <tr><td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>No customers yet</td></tr>
-                        ) : filteredCustomers.map((c, i) => {
+                        {filteredCustomers.length === 0 ? <tr><td colSpan={6} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>No customers yet</td></tr>
+                        : filteredCustomers.map((c, i) => {
                           const claimed = c.has_claimed === true || c.has_claimed === 'TRUE';
                           return (
-                            <tr key={i}
-                              style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }}
-                              onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'}
-                              onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}
-                            >
+                            <tr key={i} style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }} onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'} onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}>
                               <td style={{ padding: '12px 20px', fontWeight: 600, color: '#1e293b' }}>{c.email}</td>
                               <Td>{c.order_id || '—'}</Td>
                               <Td>{c.order_amount ? `$${c.order_amount}` : '—'}</Td>
                               <Td>{c.created_at ? new Date(c.created_at).toLocaleString() : '—'}</Td>
-                              <Td>
-                                <span style={{
-                                  padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700,
-                                  background: claimed ? '#dcfce7' : '#fef9c3',
-                                  color: claimed ? '#16a34a' : '#854d0e',
-                                }}>{claimed ? '✅ Claimed' : '⏳ Pending'}</span>
-                              </Td>
+                              <Td><span style={{ padding: '4px 10px', borderRadius: '20px', fontSize: '12px', fontWeight: 700, background: claimed ? '#dcfce7' : '#fef9c3', color: claimed ? '#16a34a' : '#854d0e' }}>{claimed ? '✅ Claimed' : '⏳ Pending'}</span></Td>
                               <Td>{c.claimed_envelope ? `#${c.claimed_envelope}` : '—'}</Td>
                             </tr>
                           );
@@ -778,16 +660,11 @@ export default function Admin() {
                     </>}
 
                     {tab === 'notclaimed' && <>
-                      <thead><tr><Th>Email</Th><Th>Order ID</Th><Th>Order Amount</Th><Th>Registered At</Th></tr></thead>
+                      <thead><tr><Th>Email</Th><Th>Order ID</Th><Th>Amount</Th><Th>Registered At</Th></tr></thead>
                       <tbody>
-                        {notClaimedYet.length === 0 ? (
-                          <tr><td colSpan={4} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>🎉 Everyone has claimed!</td></tr>
-                        ) : notClaimedYet.map((c, i) => (
-                          <tr key={i}
-                            style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }}
-                            onMouseEnter={e => e.currentTarget.style.background = '#fffbeb'}
-                            onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}
-                          >
+                        {notClaimedYet.length === 0 ? <tr><td colSpan={4} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>🎉 Everyone has claimed!</td></tr>
+                        : notClaimedYet.map((c, i) => (
+                          <tr key={i} style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }} onMouseEnter={e => e.currentTarget.style.background = '#fffbeb'} onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}>
                             <td style={{ padding: '12px 20px', fontWeight: 600, color: '#1e293b' }}>{c.email}</td>
                             <Td>{c.order_id || '—'}</Td>
                             <Td>{c.order_amount ? `$${c.order_amount}` : '—'}</Td>
@@ -800,14 +677,9 @@ export default function Admin() {
                     {tab === 'shipping' && <>
                       <thead><tr><Th>Email</Th><Th>Full Name</Th><Th>Address</Th><Th>City</Th><Th>State</Th><Th>ZIP</Th><Th>Country</Th><Th>Saved At</Th></tr></thead>
                       <tbody>
-                        {filteredShipping.length === 0 ? (
-                          <tr><td colSpan={8} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>No shipping addresses yet</td></tr>
-                        ) : filteredShipping.map((s, i) => (
-                          <tr key={i}
-                            style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }}
-                            onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'}
-                            onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}
-                          >
+                        {filteredShipping.length === 0 ? <tr><td colSpan={8} style={{ padding: '40px', textAlign: 'center', color: '#94a3b8' }}>No shipping addresses yet</td></tr>
+                        : filteredShipping.map((s, i) => (
+                          <tr key={i} style={{ borderBottom: '1px solid #f8fafc', background: i % 2 === 0 ? '#fff' : '#fafafa' }} onMouseEnter={e => e.currentTarget.style.background = '#f0f9ff'} onMouseLeave={e => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#fafafa'}>
                             <td style={{ padding: '12px 20px', fontWeight: 600, color: '#1e293b' }}>{s.email}</td>
                             <Td>{s.full_name || '—'}</Td>
                             <Td>{s.address1}{s.address2 ? `, ${s.address2}` : ''}</Td>
@@ -831,48 +703,19 @@ export default function Admin() {
 
       {/* SINGLE EDIT MODAL */}
       {editEnv && (
-        <div style={{
-          position: 'fixed', inset: 0, zIndex: 9999,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          padding: '16px', boxSizing: 'border-box',
-        }}>
-          <div onClick={() => setEditEnv(null)} style={{
-            position: 'absolute', inset: 0,
-            background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)',
-          }} />
-          <div style={{
-            position: 'relative', background: '#fff', borderRadius: '20px',
-            padding: '36px', width: '100%', maxWidth: '480px',
-            boxShadow: '0 25px 80px rgba(0,0,0,0.25)',
-            maxHeight: '90vh', overflowY: 'auto',
-          }}>
+        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', boxSizing: 'border-box' }}>
+          <div onClick={() => setEditEnv(null)} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }} />
+          <div style={{ position: 'relative', background: '#fff', borderRadius: '20px', padding: '36px', width: '100%', maxWidth: '480px', boxShadow: '0 25px 80px rgba(0,0,0,0.25)', maxHeight: '90vh', overflowY: 'auto' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-              <h3 style={{ fontWeight: 800, fontSize: '20px', color: '#1e293b' }}>
-                ✏ Edit Envelope #{editEnv.envelope_number}
-              </h3>
-              <button onClick={() => setEditEnv(null)} style={{
-                background: '#f1f5f9', border: 'none', borderRadius: '8px',
-                padding: '6px 12px', cursor: 'pointer', fontSize: '14px', color: '#64748b',
-              }}>✕</button>
+              <h3 style={{ fontWeight: 800, fontSize: '20px', color: '#1e293b' }}>✏ Edit Envelope #{editEnv.envelope_number}</h3>
+              <button onClick={() => setEditEnv(null)} style={{ background: '#f1f5f9', border: 'none', borderRadius: '8px', padding: '6px 12px', cursor: 'pointer', fontSize: '14px', color: '#64748b' }}>✕</button>
             </div>
 
             <div style={{ marginBottom: '20px' }}>
-              <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>
-                Reward Type
-              </label>
+              <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>Reward Type</label>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '8px' }}>
-                {[
-                  { value: 'product', icon: '🛍', label: 'Product' },
-                  { value: 'discount', icon: '🏷', label: 'Discount' },
-                  { value: 'empty', icon: '📭', label: 'Message' },
-                ].map(t => (
-                  <button key={t.value} onClick={() => setEditForm(f => ({ ...f, type: t.value }))} style={{
-                    padding: '12px 8px', borderRadius: '10px', border: '2px solid',
-                    borderColor: editForm.type === t.value ? '#1e293b' : '#e2e8f0',
-                    background: editForm.type === t.value ? '#1e293b' : '#f8fafc',
-                    color: editForm.type === t.value ? '#fff' : '#64748b',
-                    cursor: 'pointer', fontSize: '12px', fontWeight: 700, textAlign: 'center',
-                  }}>
+                {[{ value: 'product', icon: '🛍', label: 'Product' }, { value: 'discount', icon: '🏷', label: 'Discount' }, { value: 'empty', icon: '😔', label: 'Lose' }].map(t => (
+                  <button key={t.value} onClick={() => setEditForm(f => ({ ...f, type: t.value }))} style={{ padding: '12px 8px', borderRadius: '10px', border: '2px solid', borderColor: editForm.type === t.value ? '#1e293b' : '#e2e8f0', background: editForm.type === t.value ? '#1e293b' : '#f8fafc', color: editForm.type === t.value ? '#fff' : '#64748b', cursor: 'pointer', fontSize: '12px', fontWeight: 700, textAlign: 'center' }}>
                     <div style={{ fontSize: '20px', marginBottom: '4px' }}>{t.icon}</div>
                     <div>{t.label}</div>
                   </button>
@@ -883,29 +726,14 @@ export default function Admin() {
             {editForm.type === 'product' && (
               <div style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>Product URL</label>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <input
-                    value={editForm.product_url}
-                    onChange={e => setEditForm(f => ({ ...f, product_url: e.target.value }))}
-                    placeholder="https://stdesignsllc.com/products/..."
-                    style={{ ...inputStyle, flex: 1 }}
-                  />
-                  <button onClick={handleFetchProductSingle} disabled={fetchingProduct} style={{
-                    padding: '10px 14px', background: '#3b82f6', color: '#fff',
-                    border: 'none', borderRadius: '8px', fontSize: '13px',
-                    fontWeight: 700, cursor: 'pointer', opacity: fetchingProduct ? 0.7 : 1,
-                  }}>{fetchingProduct ? '...' : '🔍'}</button>
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                  <input value={editForm.product_url} onChange={e => setEditForm(f => ({ ...f, product_url: e.target.value }))} placeholder="https://stdesignsllc.com/products/..." style={{ ...inputStyle, flex: 1 }} />
+                  <button onClick={handleFetchProductSingle} disabled={fetchingProduct} style={{ padding: '10px 14px', background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer', opacity: fetchingProduct ? 0.7 : 1 }}>{fetchingProduct ? '...' : '🔍'}</button>
                 </div>
                 {productPreview && (
-                  <div style={{
-                    marginTop: '10px', display: 'flex', gap: '10px', alignItems: 'center',
-                    background: '#f0fdf4', border: '1px solid #86efac', borderRadius: '10px', padding: '10px',
-                  }}>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center', background: '#f0fdf4', border: '1px solid #86efac', borderRadius: '10px', padding: '10px', marginBottom: '10px' }}>
                     <img src={productPreview.image} alt="" style={{ width: '50px', height: '50px', objectFit: 'cover', borderRadius: '6px' }} />
-                    <div>
-                      <div style={{ fontWeight: 700, fontSize: '13px', color: '#166534' }}>{productPreview.title}</div>
-                      <div style={{ fontSize: '12px', color: '#4ade80' }}>✅ Ready</div>
-                    </div>
+                    <div style={{ fontWeight: 700, fontSize: '13px', color: '#166534' }}>{productPreview.title}</div>
                   </div>
                 )}
               </div>
@@ -914,33 +742,20 @@ export default function Admin() {
             {editForm.type === 'discount' && (
               <div style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>Discount Code</label>
-                <input
-                  value={editForm.discount_code}
-                  onChange={e => setEditForm(f => ({ ...f, discount_code: e.target.value.toUpperCase() }))}
-                  placeholder="e.g. MYSTERY20"
-                  style={{ ...inputStyle, fontFamily: 'monospace', letterSpacing: '2px', fontSize: '16px', fontWeight: 700 }}
-                />
+                <input value={editForm.discount_code} onChange={e => setEditForm(f => ({ ...f, discount_code: e.target.value.toUpperCase() }))} placeholder="e.g. MYSTERY20" style={{ ...inputStyle, fontFamily: 'monospace', letterSpacing: '2px', fontSize: '16px', fontWeight: 700 }} />
               </div>
             )}
 
-            {editForm.type === 'empty' && (
-              <div style={{ marginBottom: '16px' }}>
-                <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>Message</label>
-                <input
-                  value={editForm.reward_message}
-                  onChange={e => setEditForm(f => ({ ...f, reward_message: e.target.value }))}
-                  placeholder="e.g. Better luck next time! 🎲"
-                  style={inputStyle}
-                />
-              </div>
-            )}
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontWeight: 700, fontSize: '13px', color: '#374151', marginBottom: '8px' }}>
+                {editForm.type === 'product' ? 'Product Message' : editForm.type === 'discount' ? 'Discount Message' : 'Lose Message'}
+              </label>
+              <input value={editForm.reward_message} onChange={e => setEditForm(f => ({ ...f, reward_message: e.target.value }))} placeholder={editForm.type === 'product' ? 'You won a Mystery T-Shirt! 🎉' : editForm.type === 'discount' ? 'You got 20% off! 🏷' : 'Better luck next time! 🎲'} style={inputStyle} />
+            </div>
 
-            <button onClick={handleSaveEnvelope} disabled={saving} style={{
-              width: '100%', padding: '14px', background: saving ? '#94a3b8' : '#1e293b',
-              color: '#fff', border: 'none', borderRadius: '10px',
-              fontSize: '15px', fontWeight: 800, cursor: saving ? 'not-allowed' : 'pointer',
-              marginTop: '8px',
-            }}>{saving ? 'Saving...' : '💾 Save Envelope'}</button>
+            <button onClick={handleSaveEnvelope} disabled={saving} style={{ width: '100%', padding: '14px', background: saving ? '#94a3b8' : '#1e293b', color: '#fff', border: 'none', borderRadius: '10px', fontSize: '15px', fontWeight: 800, cursor: saving ? 'not-allowed' : 'pointer' }}>
+              {saving ? 'Saving...' : '💾 Save Envelope'}
+            </button>
           </div>
         </div>
       )}
