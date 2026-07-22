@@ -110,13 +110,23 @@ export default function Admin() {
       const res = await fetch("/api/reset", { method: "POST" });
       const data = await res.json();
       showMsg(data.message || "Reset done");
+      setProducts([
+        {
+          url: "",
+          image: "",
+          title: "",
+          msg: "",
+          selectedEnvelopes: new Set(),
+        },
+      ]);
+      setDiscounts([{ code: "", msg: "", selectedEnvelopes: new Set() }]);
+      setLoseMsg("Better luck next time! 🎲");
       fetchData();
     } catch (err) {
       showMsg("Reset failed", "error");
     }
     setResetting(false);
   }
-
   useEffect(() => {
     fetchData();
   }, []);
